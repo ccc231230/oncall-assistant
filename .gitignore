@@ -1,0 +1,11 @@
+node_modules/
+__pycache__/
+*.pyc
+.env
+dist/
+data/faiss.index
+data/faiss_metadata.json
+nul
+temp_hf_cache/
+temp_hf_cache.tar.gz
+.pytest_cache/

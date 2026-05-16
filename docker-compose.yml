@@ -1,0 +1,40 @@
+services:
+  elasticsearch:
+    build:
+      context: .
+      dockerfile: Dockerfile.es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q 'green\\|yellow'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - ES_HOST=http://elasticsearch:9200
+      - DATA_DIR=/app/data
+      - KIMI_API_KEY=${KIMI_API_KEY:-sk-placeholder}
+      - HF_ENDPOINT=https://hf-mirror.com
+    volumes:
+      - ./data:/app/data
+      - ./frontend/dist:/frontend/dist
+      - hf_cache:/root/.cache/huggingface
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+volumes:
+  es_data:
+  hf_cache:
