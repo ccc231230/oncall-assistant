@@ -6,6 +6,7 @@ sentence-transformers>=2.2.0
 faiss-cpu>=1.7.4
 openai>=1.6.0
 pydantic-settings>=2.1.0
+python-multipart>=0.0.6
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 httpx>=0.25.0
