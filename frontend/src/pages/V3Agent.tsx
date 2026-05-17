@@ -1,81 +1,120 @@
 import { useState, useRef, useEffect, FormEvent } from "react";
+import { useConversations } from "../hooks/useConversations";
+import ConversationSidebar from "../components/ConversationSidebar";
 import ToolCallCard from "../components/ToolCallCard";
+import FileUpload from "../components/FileUpload";
+import type { Message, RenderedEvent, PendingTool, ReActTurn } from "../types";
 
-interface PendingTool {
-  tool: string;
-  arguments: Record<string, string>;
-}
+function parseSSE(buffer: string): {
+  events: Array<{ type: string; data: Record<string, unknown> }>;
+  remaining: string;
+} {
+  const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+  const parts = buffer.split("\n\n");
+  const remaining = parts.pop() || "";
 
-interface RenderedEvent {
-  type: "thought" | "tool" | "answer" | "error";
-  content: string;
-  tool?: string;
-  arguments?: Record<string, string>;
-  result?: string;
-}
-
-interface Message {
-  role: "user" | "assistant";
-  content: string;
-  events?: RenderedEvent[];
+  for (const part of parts) {
+    if (!part.trim()) continue;
+    let eventType = "";
+    let dataStr = "";
+    for (const line of part.split("\n")) {
+      if (line.startsWith("event: ")) eventType = line.slice(7).trim();
+      else if (line.startsWith("data: ")) dataStr = line.slice(6).trim();
+    }
+    if (!eventType || !dataStr) continue;
+    try {
+      events.push({ type: eventType, data: JSON.parse(dataStr) as Record<string, unknown> });
+    } catch {
+      /* skip malformed */
+    }
+  }
+  return { events, remaining };
 }
 
 export default function V3Agent() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const {
+    conversations,
+    activeId,
+    activeConversation,
+    createConversation,
+    switchConversation,
+    deleteConversation,
+    updateMessages,
+  } = useConversations();
+
+  const messages: Message[] = activeConversation?.messages ?? [];
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Auto-scroll
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  function parseSSE(buffer: string): { events: Array<{ type: string; data: any }>; remaining: string } {
-    const events: Array<{ type: string; data: any }> = [];
-    const parts = buffer.split("\n\n");
-    const remaining = parts.pop() || "";
-
-    for (const part of parts) {
-      if (!part.trim()) continue;
-      let eventType = "";
-      let dataStr = "";
-      for (const line of part.split("\n")) {
-        if (line.startsWith("event: ")) eventType = line.slice(7).trim();
-        else if (line.startsWith("data: ")) dataStr = line.slice(6).trim();
-      }
-      if (!eventType || !dataStr) continue;
-      try {
-        events.push({ type: eventType, data: JSON.parse(dataStr) });
-      } catch { /* skip malformed */ }
+  // Ensure we always have an active conversation
+  useEffect(() => {
+    if (!activeId) {
+      createConversation();
     }
-    return { events, remaining };
-  }
+  }, [activeId, createConversation]);
 
   async function handleSend(e: FormEvent) {
     e.preventDefault();
     if (!input.trim() || loading) return;
+    if (!activeId) return;
 
     const userMsg: Message = { role: "user", content: input.trim() };
-    setMessages((prev) => [...prev, userMsg]);
+    const updatedMessages = [...messages, userMsg];
     setInput("");
     setLoading(true);
 
-    const assistantMsg: Message = { role: "assistant", content: "", events: [] };
-    setMessages((prev) => [...prev, assistantMsg]);
+    // Show user message immediately
+    updateMessages(updatedMessages);
 
-    // Track pending tool calls to merge with their results
+    const assistantMsg: Message = {
+      role: "assistant",
+      content: "",
+      events: [],
+    };
+    const messagesWithAssistant = [...updatedMessages, assistantMsg];
+    updateMessages(messagesWithAssistant);
+
+    // Track pending tool calls and turns
     let pendingTool: PendingTool | null = null;
+    let currentTurn: ReActTurn | null = null;
+    const turns: ReActTurn[] = [];
+    let answerStarted = false;  // track streaming answer start
+
+    function flushTurn() {
+      if (currentTurn) {
+        turns.push(currentTurn);
+        currentTurn = null;
+      }
+    }
 
     function appendEvent(event: RenderedEvent) {
-      setMessages((prev) => {
-        const updated = [...prev];
-        const last = updated[updated.length - 1];
-        if (last && last.role === "assistant") {
-          last.events = [...(last.events || []), event];
-          if (event.type === "answer") last.content = event.content;
+      const allMessages = [...updatedMessages, assistantMsg];
+      const last = allMessages[allMessages.length - 1];
+      if (last && last.role === "assistant") {
+        const existing = last.events || [];
+        if (event.type === "answer" && existing.length > 0 && existing[existing.length - 1].type === "answer") {
+          // Merge consecutive answer chunks into one event to avoid fragmented rendering
+          existing[existing.length - 1].content += event.content;
+          last.events = existing;
+        } else {
+          last.events = [...existing, event];
         }
-        return updated;
-      });
+        last.turns = [...turns];
+        if (currentTurn) {
+          last.turns = [...turns, currentTurn];
+        }
+        if (event.type === "answer") {
+          last.content = (last.content || "") + event.content;
+        }
+      }
+      updateMessages(allMessages);
     }
 
     try {
@@ -101,44 +140,76 @@ export default function V3Agent() {
 
         for (const evt of events) {
           switch (evt.type) {
-            case "thought":
-              appendEvent({ type: "thought", content: evt.data.content || "" });
-              break;
-            case "tool_call":
-              pendingTool = {
-                tool: evt.data.tool || "unknown",
-                arguments: evt.data.arguments || {},
+            case "thought": {
+              flushTurn();
+              currentTurn = {
+                turnNumber: turns.length + 1,
+                thought: (evt.data.content as string) || "",
               };
+              appendEvent({
+                type: "thought",
+                content: currentTurn.thought,
+              });
               break;
-            case "tool_result":
+            }
+            case "tool_call": {
+              pendingTool = {
+                tool: (evt.data.tool as string) || "unknown",
+                arguments: (evt.data.arguments as Record<string, string>) || {},
+              };
+              if (currentTurn) {
+                currentTurn.toolCall = { ...pendingTool };
+              }
+              break;
+            }
+            case "tool_result": {
+              const resultContent = (evt.data.content as string) || "";
               if (pendingTool) {
+                if (currentTurn) {
+                  currentTurn.toolResult = resultContent;
+                }
                 appendEvent({
                   type: "tool",
-                  content: evt.data.content || "",
+                  content: resultContent,
                   tool: pendingTool.tool,
                   arguments: pendingTool.arguments,
-                  result: evt.data.content || "",
+                  result: resultContent,
                 });
               } else {
                 appendEvent({
                   type: "tool",
-                  content: evt.data.content || "",
+                  content: resultContent,
                   tool: "readFile",
                   arguments: {},
-                  result: evt.data.content || "",
+                  result: resultContent,
                 });
               }
               pendingTool = null;
               break;
-            case "answer":
-              appendEvent({ type: "answer", content: evt.data.content || "" });
+            }
+            case "answer": {
+              if (!answerStarted) {
+                flushTurn();
+                answerStarted = true;
+              }
+              const answerContent = (evt.data.content as string) || "";
+              appendEvent({ type: "answer", content: answerContent });
               break;
-            case "error":
-              appendEvent({ type: "error", content: evt.data.content || "" });
+            }
+            case "error": {
+              const errorContent = (evt.data.content as string) || "";
+              if (currentTurn) {
+                currentTurn.error = errorContent;
+              }
+              appendEvent({ type: "error", content: errorContent });
               break;
+            }
           }
         }
       }
+
+      // Flush any remaining turn
+      flushTurn();
     } catch (err) {
       appendEvent({
         type: "error",
@@ -150,18 +221,38 @@ export default function V3Agent() {
   }
 
   return (
-    <div>
-      <div className="mb-6">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">Phase 3 · On-Call Agent</h2>
-        <p className="text-gray-500 text-sm">
-          基于 Kimi API (kimi-k2.6) 的智能 Agent，可自动查阅 SOP 文档回答值班问题
-        </p>
-      </div>
+    <div className="flex h-[calc(100vh-4rem)]">
+      {/* Sidebar */}
+      <ConversationSidebar
+        conversations={conversations}
+        activeId={activeId}
+        onSelect={(id) => {
+          switchConversation(id);
+          setSidebarOpen(false); // close on mobile after select
+        }}
+        onDelete={deleteConversation}
+        onCreate={() => {
+          createConversation();
+          setSidebarOpen(false);
+        }}
+        isOpen={sidebarOpen}
+        onToggle={() => setSidebarOpen(!sidebarOpen)}
+      />
 
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm">
-        <div data-testid="chat-messages" className="h-[500px] overflow-y-auto p-4 space-y-4">
+      {/* Main Chat */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Header */}
+        <div className="px-4 lg:px-6 py-4 border-b border-gray-200 bg-white">
+          <h2 className="text-xl font-bold text-gray-900">Phase 3 · On-Call Agent</h2>
+          <p className="text-gray-500 text-xs mt-0.5">
+            基于 Kimi API 的智能 Agent，自动查阅 SOP 文档回答值班问题
+          </p>
+        </div>
+
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
           {messages.length === 0 && (
-            <div data-testid="chat-welcome" className="text-center py-20 text-gray-400">
+            <div className="text-center py-20 text-gray-400">
               <p className="text-lg mb-2">On-Call 值班助手</p>
               <p className="text-sm">请描述你遇到的值班问题，我将查阅 SOP 文档为你解答</p>
               <div className="mt-4 text-xs text-gray-300 space-y-1">
@@ -174,12 +265,15 @@ export default function V3Agent() {
           )}
 
           {messages.map((msg, i) => (
-            <div key={i} data-testid={msg.role === "user" ? "user-message" : "assistant-message"} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+            <div
+              key={i}
+              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+            >
               <div
                 className={`max-w-[85%] rounded-lg ${
                   msg.role === "user"
                     ? "bg-blue-600 text-white px-4 py-2"
-                    : "bg-gray-50 border border-gray-200"
+                    : "bg-white border border-gray-200 shadow-sm"
                 }`}
               >
                 {msg.role === "user" ? (
@@ -191,30 +285,45 @@ export default function V3Agent() {
                         switch (evt.type) {
                           case "thought":
                             return (
-                              <div key={j} data-testid="thought-card" className="text-xs text-gray-400 italic px-4 py-1">
-                                {evt.content}
+                              <div
+                                key={j}
+                                className="text-xs text-gray-400 italic px-4 py-1 border-b border-gray-100"
+                              >
+                                💭 {evt.content}
                               </div>
                             );
                           case "tool":
                             return (
-                              <div key={j} data-testid="tool-card" className="px-4 py-1">
+                              <div key={j} className="px-4 py-1 border-b border-gray-100">
                                 <ToolCallCard
                                   tool={evt.tool || "unknown"}
                                   arguments={evt.arguments || {}}
                                   result={evt.result || evt.content}
+                                  stepNumber={
+                                    msg.events
+                                      ?.filter(
+                                        (e, idx) => e.type === "tool" && idx <= j
+                                      ).length
+                                  }
                                 />
                               </div>
                             );
                           case "answer":
                             return (
-                              <div key={j} data-testid="answer-bubble" className="px-4 py-2 text-sm text-gray-800 whitespace-pre-wrap">
+                              <div
+                                key={j}
+                                className="px-4 py-3 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed"
+                              >
                                 {evt.content}
                               </div>
                             );
                           case "error":
                             return (
-                              <div key={j} data-testid="error-card" className="px-4 py-2 text-sm text-red-600 bg-red-50 mx-4 rounded">
-                                {evt.content}
+                              <div
+                                key={j}
+                                className="px-4 py-2 text-sm text-red-600 bg-red-50 mx-4 my-2 rounded"
+                              >
+                                ❌ {evt.content}
                               </div>
                             );
                           default:
@@ -222,13 +331,13 @@ export default function V3Agent() {
                         }
                       })
                     ) : msg.content ? (
-                      <p className="px-4 py-2 text-sm text-gray-800 whitespace-pre-wrap">
+                      <p className="px-4 py-3 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
                         {msg.content}
                       </p>
                     ) : (
-                      <div data-testid="loading-indicator" className="px-4 py-3 flex items-center gap-2">
+                      <div className="px-4 py-3 flex items-center gap-2">
                         <div className="flex gap-1">
-                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" />
                           <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
                           <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
                         </div>
@@ -243,10 +352,16 @@ export default function V3Agent() {
           <div ref={chatEndRef} />
         </div>
 
-        <form onSubmit={handleSend} className="border-t border-gray-200 p-4 flex gap-3">
+        {/* File Upload */}
+        <FileUpload />
+
+        {/* Input */}
+        <form
+          onSubmit={handleSend}
+          className="border-t border-gray-200 bg-white p-4 flex gap-3"
+        >
           <input
             type="text"
-            data-testid="chat-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="描述你遇到的值班问题..."
@@ -255,7 +370,6 @@ export default function V3Agent() {
           />
           <button
             type="submit"
-            data-testid="chat-send"
             disabled={loading || !input.trim()}
             className="px-6 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
           >

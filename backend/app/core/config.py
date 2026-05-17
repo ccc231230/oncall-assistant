@@ -26,5 +26,8 @@ class Settings(BaseSettings):
     # Agent
     MAX_AGENT_TURNS: int = 5
 
+    # File upload
+    MAX_UPLOAD_SIZE_MB: int = 10
+
 
 settings = Settings()

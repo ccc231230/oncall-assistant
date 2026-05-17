@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir \
     uvicorn[standard]>=0.24.0 \
     beautifulsoup4>=4.12.0 \
     pydantic-settings>=2.1.0 \
+    python-multipart>=0.0.6 \
     pytest>=7.4.0 \
     pytest-asyncio>=0.21.0 \
     httpx>=0.25.0

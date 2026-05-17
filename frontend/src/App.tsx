@@ -32,14 +32,12 @@ export default function App() {
       </nav>
 
       {/* Page Content */}
-      <main className="max-w-6xl mx-auto px-4 py-6">
-        <Routes>
-          <Route path="/" element={<Navigate to="/v1" replace />} />
-          <Route path="/v1" element={<V1Search />} />
-          <Route path="/v2" element={<V2Search />} />
-          <Route path="/v3" element={<V3Agent />} />
-        </Routes>
-      </main>
+      <Routes>
+        <Route path="/" element={<Navigate to="/v1" replace />} />
+        <Route path="/v1" element={<main className="max-w-6xl mx-auto px-4 py-6"><V1Search /></main>} />
+        <Route path="/v2" element={<main className="max-w-6xl mx-auto px-4 py-6"><V2Search /></main>} />
+        <Route path="/v3" element={<V3Agent />} />
+      </Routes>
     </div>
   );
 }

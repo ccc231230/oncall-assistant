@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
 
 
@@ -37,3 +37,22 @@ class ChatRequest(BaseModel):
 class SSEEvent(BaseModel):
     event: str  # "thought" | "tool_call" | "tool_result" | "answer" | "error"
     data: dict
+
+
+# --- Phase 3c: File Upload ---
+
+class UploadResponse(BaseModel):
+    success: bool
+    filename: str | None = None
+    size: int | None = None
+    error: str | None = None
+
+
+class FileInfo(BaseModel):
+    name: str
+    size: int
+    modified: str
+
+
+class FileListResponse(BaseModel):
+    files: list[FileInfo]
